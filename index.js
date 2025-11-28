@@ -5,7 +5,7 @@ const {
   Routes
 } = require('discord.js');
 
-require('dotenv').config();
+
 
 // 🔧 Env vars
 const DISCORD_TOKEN  = process.env.DISCORD_TOKEN;
