@@ -3,13 +3,20 @@ const {
   GatewayIntentBits
 } = require("discord.js");
 
+// ========== CONSTANTS / OWNER ==========
+const OWNER_ID = "1123073076360380487"; // <-- YOU
+
 // ========== ENV VARS ==========
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const GUILD_ID      = process.env.GUILD_ID;
-const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID;
+
+// we don’t actually need GUILD_ID for this message-based bot,
+// but we’ll still read it so Railway is happy
+const GUILD_ID      = process.env.GUILD_ID || "";
+
+const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || "";
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID || "";
 
-// (Other vars read so Railway doesn't complain)
+// other vars just to satisfy Railway
 const ADMIN_APPROVAL_CHANNEL_ID = process.env.ADMIN_APPROVAL_CHANNEL_ID || "";
 const MEDIA_CATEGORY_ID         = process.env.MEDIA_CATEGORY_ID || "";
 const REPORT_CATEGORY_ID        = process.env.REPORT_CATEGORY_ID || "";
@@ -18,10 +25,17 @@ const TICKET_PANEL_CHANNEL_ID   = process.env.TICKET_PANEL_CHANNEL_ID || "";
 const TRANSCRIPT_LOG_CHANNEL_ID = process.env.TRANSCRIPT_LOG_CHANNEL_ID || "";
 const POSTGRES_URL              = process.env.POSTGRES_URL || "";
 
-if (!DISCORD_TOKEN || !GUILD_ID || !ADMIN_ROLE_ID) {
-  console.error("❌ Missing required env vars.");
+if (!DISCORD_TOKEN) {
+  console.error("❌ DISCORD_TOKEN missing.");
   process.exit(1);
 }
+
+console.log("🔧 ENV CHECK:", {
+  DISCORD_TOKEN: !!DISCORD_TOKEN,
+  GUILD_ID: !!GUILD_ID,
+  ADMIN_ROLE_ID: !!ADMIN_ROLE_ID,
+  STAFF_ROLE_ID: !!STAFF_ROLE_ID
+});
 
 // ========== CLIENT ==========
 const client = new Client({
@@ -29,76 +43,100 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.MessageContent   // make sure this is enabled in Dev Portal
   ]
 });
 
-// ========== BOOT ==========
+// ========== READY ==========
 client.once("ready", () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
 });
 
 // ========== MESSAGE HANDLER ==========
 client.on("messageCreate", async (msg) => {
-  // Ignore bots
+  // ignore bots & DMs
   if (msg.author.bot) return;
+  if (!msg.guild) return;
 
-  // Only respond if bot is pinged
+  // only react if the bot is mentioned
   if (!msg.mentions.has(client.user)) return;
 
-  // Command format: @Bot role <roleID> <userID>
-  const args = msg.content.split(/\s+/).slice(1); 
-  // args[0] = "role"
-  // args[1] = roleID
-  // args[2] = userID
+  // remove the bot mention from the message content
+  const mentionPattern = new RegExp(`<@!?${client.user.id}>`, "g");
+  const withoutMention = msg.content.replace(mentionPattern, "").trim();
 
-  if (args[0] !== "role") {
-    return msg.reply("❌ Invalid command. Use: `@Bot role <roleID> <userID>`");
+  if (!withoutMention.length) {
+    return msg.reply("Usage: `@Bot role <roleID> <userID or @user>`");
   }
 
-  const roleID = args[1];
-  const userID = args[2];
+  const parts = withoutMention.split(/\s+/);
+  const command = (parts[0] || "").toLowerCase();
 
-  if (!roleID || !userID) {
-    return msg.reply("❌ Usage: `@Bot role <roleID> <userID>`");
+  if (command !== "role") {
+    return msg.reply("❌ Invalid command. Use: `@Bot role <roleID> <userID or @user>`");
   }
 
-  // Permission check
-  const invoker = await msg.guild.members.fetch(msg.author.id);
+  const roleID = parts[1];
+  let userArg = parts[2];
 
-  const isAdmin = invoker.roles.cache.has(ADMIN_ROLE_ID);
+  if (!roleID || !userArg) {
+    return msg.reply("❌ Usage: `@Bot role <roleID> <userID or @user>`");
+  }
+
+  // support @mention OR raw ID for the user
+  // e.g. <@1234567890> or <@!1234567890>
+  const mentionMatch = userArg.match(/^<@!?(\d+)>$/);
+  const userID = mentionMatch ? mentionMatch[1] : userArg;
+
+  // ===== permission check =====
+  let invoker;
+  try {
+    invoker = await msg.guild.members.fetch(msg.author.id);
+  } catch (e) {
+    console.error("Error fetching invoking member:", e);
+    return msg.reply("❌ Could not verify your permissions.");
+  }
+
+  const isOwner = msg.author.id === OWNER_ID;
+  const isAdmin = ADMIN_ROLE_ID && invoker.roles.cache.has(ADMIN_ROLE_ID);
   const isStaff = STAFF_ROLE_ID && invoker.roles.cache.has(STAFF_ROLE_ID);
 
-  if (!isAdmin && !isStaff) {
+  if (!isOwner && !isAdmin && !isStaff) {
     return msg.reply("❌ You don't have permission to use this.");
   }
 
-  // Fetch target user
+  // ===== fetch target user =====
   let target;
   try {
     target = await msg.guild.members.fetch(userID);
-  } catch {
-    return msg.reply("❌ Invalid userID.");
+  } catch (e) {
+    console.error("Error fetching target member:", e);
+    return msg.reply("❌ Invalid user ID or user not in this server.");
   }
 
-  // Try adding role
+  // ===== fetch role =====
+  const role = msg.guild.roles.cache.get(roleID);
+  if (!role) {
+    return msg.reply("❌ Invalid role ID.");
+  }
+
+  // ===== check bot's role hierarchy =====
+  const me = await msg.guild.members.fetchMe();
+  if (me.roles.highest.position <= role.position) {
+    return msg.reply("❌ I can't manage that role (my role is lower or equal).");
+  }
+
+  // ===== add the role =====
   try {
-    const role = msg.guild.roles.cache.get(roleID);
-    if (!role) return msg.reply("❌ Invalid roleID.");
-
-    // Check hierarchy
-    const me = await msg.guild.members.fetchMe();
-    if (me.roles.highest.position <= role.position) {
-      return msg.reply("❌ I cannot manage that role (role too high).");
-    }
-
     await target.roles.add(role);
     return msg.reply(`✅ Added role **${role.name}** to <@${userID}>`);
-  } catch (err) {
-    console.error(err);
-    return msg.reply("❌ Failed to give role. Check bot permissions & role order.");
+  } catch (e) {
+    console.error("Error adding role:", e);
+    return msg.reply("❌ Failed to give the role. Check my permissions and role order.");
   }
 });
 
 // ========== LOGIN ==========
-client.login(DISCORD_TOKEN);
+client.login(DISCORD_TOKEN).catch((err) => {
+  console.error("❌ Failed to login:", err);
+});
